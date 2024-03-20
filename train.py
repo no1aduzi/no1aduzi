@@ -99,6 +99,7 @@ RANK = int(os.getenv("RANK", -1))
 WORLD_SIZE = int(os.getenv("WORLD_SIZE", 1))
 GIT_INFO = check_git_info()
 
+
 distillation_weight = 0.5
 
 def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictionary
@@ -191,26 +192,23 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
     amp = check_amp(model)  # check AMP
 
-    teacher_model_path = "C:/Users/44739/yolov5/yolov5x.pt"  # Specify the path to your teacher model
-    if os.path.exists(teacher_model_path):
-        # Instantiate teacher model with the same architecture as the student model
-        teacher_model = Model(cfg="C:/Users/44739/yolov5/models/yolov5x.yaml", ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)
-        
-        # Load state dictionary of the teacher model
-        checkpoint = torch.load(teacher_model_path, map_location=device)
-        if isinstance(checkpoint, dict) and 'model' in checkpoint:
-            teacher_model.load_state_dict(checkpoint['model'])
-        elif isinstance(checkpoint, dict):
-            teacher_model.load_state_dict(checkpoint)
-        else:
-            raise ValueError("Unexpected format for the checkpoint file.")
-        
-        # Set teacher model to evaluation mode
-        teacher_model.eval()
-        print("Teacher model loaded successfully.")
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    teacher_model_path = "C:/Users/44739/yolov5/yolov5x.pt"
+    
+    # Load the checkpoint
+    checkpoint = torch.load(teacher_model_path, map_location=device)
+    
+    # Check the type of the checkpoint or its 'model' component
+    print(type(checkpoint))
+    if isinstance(checkpoint, dict) and 'model' in checkpoint:
+        teacher_model = checkpoint['model']  # 'model' is the instance
+        # Ensure the model is on the correct device
+        teacher_model = teacher_model.float()
+        teacher_model = teacher_model.to(device)
     else:
-        teacher_model = None
-        print("Teacher model path does not exist. Continuing without knowledge distillation.")
+        raise ValueError("Checkpoint does not contain a model instance under 'model' key.")
+    
+    # Proceed with teacher_model as needed...
 
 
 
@@ -408,7 +406,21 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
             if teacher_model is not None:
                 with torch.no_grad():  # Disable gradients for the teacher model
                     teacher_pred = teacher_model(imgs)
-                distillation_loss = compute_distillation_loss(pred, teacher_pred, temperature=2.0)
+                print(teacher_pred[0].shape)
+                # Assuming student_logits and teacher_logits are extracted and focusing on comparable parts
+                #batch_size, num_classes = pred.shape[0], pred.shape[-1]
+                # Assuming pred is a list of tensors and we're interested in the first tensor
+                if isinstance(pred, list) and len(pred) > 0:
+                    first_scale_preds = pred[0]  # Accessing the first tensor in the list
+                    batch_size, num_classes = first_scale_preds.shape[0], first_scale_preds.shape[-1]
+                else:
+                    raise ValueError("Unexpected model output format.")
+
+                teacher_logits = teacher_pred[0].view(batch_size, -1, num_classes)  # Reshape to align with student
+                student_logits = pred.view(batch_size, -1, num_classes)  # Similar reshaping for student
+                
+                # Proceed with distillation loss computation
+                distillation_loss = compute_distillation_loss(student_logits, teacher_logits, temperature=2.0)
                 loss += distillation_weight * distillation_loss  # Combine losses
             # Backward
             scaler.scale(loss).backward()
@@ -539,8 +551,15 @@ def compute_distillation_loss(student_preds, teacher_preds, temperature=1.0):
     Calculate the distillation loss between student and teacher outputs.
     Here's an example using the KL divergence for simplicity.
     """
-    teacher_logits = teacher_preds / temperature
-    student_logits = student_preds / temperature
+    if isinstance(teacher_preds, tuple):
+        teacher_logits = teacher_preds[0] / temperature
+    else:
+        teacher_logits = teacher_preds / temperature
+    if isinstance(student_preds, list):
+        student_logits = student_preds[0] / temperature
+    else:
+        student_logits = student_preds / temperature
+
     loss = F.kl_div(F.log_softmax(student_logits, dim=-1),
                     F.softmax(teacher_logits, dim=-1), reduction="batchmean")
     return loss
